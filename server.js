@@ -57,72 +57,110 @@ function checkYtdlp() {
 // Stream audio via yt-dlp
 // ──────────────────────────────────────────────
 function streamViaYtdlp(res, videoIdOrUrl, itag) {
-  // Check if yt-dlp is available
-  const proc = spawn("yt-dlp", ["--version"], { timeout: 3000 });
-  proc.on("error", () => {
+  const ytUrl =
+    videoIdOrUrl.includes("youtube.com") || videoIdOrUrl.includes("youtu.be")
+      ? videoIdOrUrl
+      : `https://www.youtube.com/watch?v=${videoIdOrUrl}`;
+
+  const proxies = Array.from({ length: 10 }, (_, i) => {
+    return process.env[`YT_PROXY_${i + 1}`];
+  }).filter(Boolean);
+
+  function getRandomProxy() {
+    if (!proxies.length) return null;
+
+    return proxies[Math.floor(Math.random() * proxies.length)];
+  }
+
+  const proxy = getRandomProxy();
+
+  const args = ["-m", "yt_dlp", "--version"];
+
+  console.log("🔎 Checking yt-dlp through Python...");
+
+  const checkProc = spawn("python", args, {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let versionOutput = "";
+  let versionError = "";
+
+  checkProc.stdout.on("data", (d) => {
+    versionOutput += d.toString();
+  });
+
+  checkProc.stderr.on("data", (d) => {
+    versionError += d.toString();
+  });
+
+  checkProc.on("error", (err) => {
+    console.error("Python/yt-dlp check error:", err.message);
+
     if (!res.headersSent) {
       return res.status(500).json({
-        error: "yt-dlp not found. Install it: pip install yt-dlp",
-        hint: "brew install yt-dlp  or  pip3 install yt-dlp",
+        error: "Python or yt-dlp not available",
+        details: err.message,
       });
     }
   });
-  proc.on("close", (code) => {
+
+  checkProc.on("close", (code) => {
     if (code !== 0) {
+      console.error("yt-dlp check failed:", versionError);
+
       if (!res.headersSent) {
-        return res.status(500).json({ error: "yt-dlp not available" });
+        return res.status(500).json({
+          error: "yt-dlp not available",
+          details: versionError.slice(0, 500),
+        });
       }
+
       return;
     }
 
-    // yt-dlp is available, stream the audio
-    const ytUrl =
-      videoIdOrUrl.includes("youtube.com") || videoIdOrUrl.includes("youtu.be")
-        ? videoIdOrUrl
-        : `https://www.youtube.com/watch?v=${videoIdOrUrl}`;
+    console.log(`✅ yt-dlp version: ${versionOutput.trim()}`);
 
-    const proxies = Array.from({ length: 10 }, (_, i) => {
-      return process.env[`YT_PROXY_${i + 1}`];
-    }).filter(Boolean);
+    const ytArgs = [
+      "-m",
+      "yt_dlp",
 
-    function getRandomProxy() {
-      return proxies[Math.floor(Math.random() * proxies.length)];
-    }
-
-    const proxy = getRandomProxy();
-
-    const args = [
       "-f",
       itag ? String(itag) : "140/251/250/249/139/bestaudio",
+
       "-o",
       "-",
+
       "--no-playlist",
       "--no-warnings",
       "--quiet",
       "--no-progress",
-      "--proxy",
-      proxy,
-      ytUrl,
     ];
 
-    console.log(`  📡 yt-dlp ${args.join(" ")}`);
+    if (proxy) {
+      ytArgs.push("--proxy", proxy);
+    }
 
-    const ytProc = spawn("yt-dlp", args, {
+    ytArgs.push(ytUrl);
+
+    console.log("📡 Starting yt-dlp...");
+    console.log("🎯 URL:", ytUrl);
+    console.log("🌐 Proxy:", proxy ? "configured" : "not configured");
+
+    const ytProc = spawn("python", ytArgs, {
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 0,
     });
 
-    // Set appropriate content type header
     const ext =
       itag === "251" || itag === "250" || itag === "249"
         ? "audio/webm"
         : "audio/mp4";
+
     res.setHeader("Content-Type", ext);
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("X-Stream-Backend", "yt-dlp");
 
-    // Capture stderr silently
     let stderr = "";
+
     ytProc.stderr.on("data", (d) => {
       stderr += d.toString();
     });
@@ -131,16 +169,21 @@ function streamViaYtdlp(res, videoIdOrUrl, itag) {
 
     ytProc.on("error", (err) => {
       console.error("yt-dlp error:", err.message);
+
       if (!res.headersSent) {
-        // Try fallback: direct InnerTube URL
         streamFallback(res, videoIdOrUrl, itag);
       }
     });
 
     ytProc.on("close", (code) => {
-      if (code !== 0 && !res.headersSent) {
-        console.error("yt-dlp stderr:", stderr.slice(0, 500));
-        streamFallback(res, videoIdOrUrl, itag);
+      if (code !== 0) {
+        console.error("yt-dlp exited with code:", code);
+
+        console.error("yt-dlp stderr:", stderr.slice(0, 1000));
+
+        if (!res.headersSent) {
+          streamFallback(res, videoIdOrUrl, itag);
+        }
       }
     });
   });
